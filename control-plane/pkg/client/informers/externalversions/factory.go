@@ -1,5 +1,5 @@
 /*
- * Copyright 2020 The Knative Authors
+ * Copyright 2021 The Knative Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,6 +30,7 @@ import (
 	versioned "knative.dev/eventing-kafka-broker/control-plane/pkg/client/clientset/versioned"
 	eventing "knative.dev/eventing-kafka-broker/control-plane/pkg/client/informers/externalversions/eventing"
 	internalinterfaces "knative.dev/eventing-kafka-broker/control-plane/pkg/client/informers/externalversions/internalinterfaces"
+	messaging "knative.dev/eventing-kafka-broker/control-plane/pkg/client/informers/externalversions/messaging"
 )
 
 // SharedInformerOption defines the functional option type for SharedInformerFactory.
@@ -173,8 +174,13 @@ type SharedInformerFactory interface {
 	WaitForCacheSync(stopCh <-chan struct{}) map[reflect.Type]bool
 
 	Eventing() eventing.Interface
+	Messaging() messaging.Interface
 }
 
 func (f *sharedInformerFactory) Eventing() eventing.Interface {
 	return eventing.New(f, f.namespace, f.tweakListOptions)
+}
+
+func (f *sharedInformerFactory) Messaging() messaging.Interface {
+	return messaging.New(f, f.namespace, f.tweakListOptions)
 }
