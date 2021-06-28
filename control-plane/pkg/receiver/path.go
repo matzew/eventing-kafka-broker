@@ -8,6 +8,7 @@ import (
 
 // PathFromObject returns an HTTP request path given a generic object.
 func PathFromObject(obj metav1.Object) string {
+	// TODO: create a ticket about conflicting names
 	return Path(obj.GetNamespace(), obj.GetName())
 }
 
