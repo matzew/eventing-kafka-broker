@@ -63,7 +63,7 @@ spec:
             - name: BROKER_DATA_PLANE_CONFIG_MAP_NAME
               value: kafka-broker-brokers-triggers
             - name: CHANNEL_DATA_PLANE_CONFIG_MAP_NAME
-              value: kafka-sink-sinks
+              value: kafka-channel-channels-subscriptions
             - name: SINK_DATA_PLANE_CONFIG_MAP_NAME
               value: kafka-sink-sinks
 
@@ -77,14 +77,14 @@ spec:
             - name: BROKER_INGRESS_NAME
               value: kafka-broker-ingress
             - name: CHANNEL_INGRESS_NAME
-              value: kafka-sink-ingress
+              value: kafka-channel-ingress
             - name: SINK_INGRESS_NAME
               value: kafka-sink-ingress
 
             - name: BROKER_GENERAL_CONFIG_MAP_NAME
               value: kafka-broker-config
             - name: CHANNEL_GENERAL_CONFIG_MAP_NAME
-              value: kafka-broker-config
+              value: kafka-broker-config    # TODO?
             - name: SINK_GENERAL_CONFIG_MAP_NAME
               value: kafka-broker-config
 
