@@ -100,7 +100,7 @@ func (r *Reconciler) reconcileKind(ctx context.Context, channel *messagingv1beta
 			ReplicaAssignment: nil,
 			ConfigEntries:     nil,
 		},
-		BootstrapServers: []string{"my-cluster-kafka-bootstrap.my-kafka-namespace:9092"},
+		BootstrapServers: []string{"my-cluster-kafka-bootstrap.kafka:9092"},
 	}
 
 	if err != nil {
@@ -307,7 +307,7 @@ func (r *Reconciler) finalizeKind(ctx context.Context, channel *messagingv1beta1
 			ReplicaAssignment: nil,
 			ConfigEntries:     nil,
 		},
-		BootstrapServers: []string{"my-cluster-kafka-bootstrap.my-kafka-namespace:9092"},
+		BootstrapServers: []string{"my-cluster-kafka-bootstrap.kafka:9092"},
 	}
 
 	// TODO
@@ -438,7 +438,7 @@ func (r *Reconciler) ConfigMapUpdated(ctx context.Context) func(configMap *corev
 				ReplicaAssignment: nil,
 				ConfigEntries:     nil,
 			},
-			BootstrapServers: []string{"my-cluster-kafka-bootstrap.my-kafka-namespace:9092"},
+			BootstrapServers: []string{"my-cluster-kafka-bootstrap.kafka:9092"},
 		}
 
 		logger.Debug("new defaults",
