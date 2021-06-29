@@ -138,11 +138,11 @@ func NewController(ctx context.Context, watcher configmap.Watcher, configs *Conf
 	))
 
 	// TODO: any filters necessary?
-	channelInformer.Informer().AddEventHandler(cache.FilteringResourceEventHandler{
-		Handler: cache.ResourceEventHandlerFuncs{
+	channelInformer.Informer().AddEventHandler(
+		cache.ResourceEventHandlerFuncs{
 			DeleteFunc: reconciler.OnDeleteObserver,
 		},
-	})
+	)
 
 	cm, err := reconciler.KubeClient.CoreV1().ConfigMaps(configs.SystemNamespace).Get(ctx, configs.GeneralConfigMapName, metav1.GetOptions{})
 	if err != nil {
