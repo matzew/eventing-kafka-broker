@@ -31,4 +31,5 @@ data-plane/**/build/
 eventing-kafka-controller.yaml
 eventing-kafka-broker.yaml
 eventing-kafka-sink.yaml
+eventing-kafka-channel.yaml
 

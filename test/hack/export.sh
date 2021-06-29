@@ -26,3 +26,5 @@ kubectl get pods -A >"${OUTPUT}"
 
   kubectl get cm -n knative-eventing kafka-broker-brokers-triggers -oyaml
 } >>"${OUTPUT}" 2>&1
+
+# TODO: export others too!
