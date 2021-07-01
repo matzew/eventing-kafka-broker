@@ -18,6 +18,7 @@ package channel
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -352,22 +353,134 @@ func (r *Reconciler) finalizeKind(ctx context.Context, channel *messagingv1beta1
 	return nil
 }
 
-func (r *Reconciler) reconcileSubscribers(ctx context.Context, ch *messagingv1beta1.KafkaChannel) error {
-	after := ch.DeepCopy()
+func (r *Reconciler) reconcileSubscribers(ctx context.Context, channel *messagingv1beta1.KafkaChannel) error {
+	logger := kafkabrokerlogging.CreateReconcileMethodLogger(ctx, channel)
+
+	// TODO: this object is duplicated
+	channelStatusConditionManager := base.StatusConditionManager{
+		Object:     channel,
+		SetAddress: channel.Status.SetAddress,
+		Configs:    &r.Configs.Env,
+		Recorder:   controller.GetEventRecorder(ctx),
+	}
+
+	// Get data plane config map.
+	contractConfigMap, err := r.GetOrCreateDataPlaneConfigMap(ctx)
+	if err != nil {
+		// In case of errors like this, which is not related,
+		// to a single subscription, we should still set the error
+		// on the KafkaChannel status.
+		// For problems about the subscription, we should set it on the
+		// subscriber.
+		// However, core eventing-controller is setting the status
+		// of individual subscriptions, we cannot set the status of
+		// the subscription itself. We can set it on the
+		// channel.Spec.Subscribers though.
+		return channelStatusConditionManager.FailedToGetConfig(err)
+	}
+
+	logger.Debug("Got contract config map")
+
+	// Get data plane config data.
+	ct, err := r.GetDataPlaneConfigMapData(logger, contractConfigMap)
+	if err != nil || ct == nil {
+		// TODO:
+		// return channelStatusConditionManager.FailedToGetDataPlaneConfigFromConfigMap(err)
+		return channelStatusConditionManager.FailedToGetConfig(err)
+	}
+
+	logger.Debug(
+		"Got contract data from config map",
+		zap.Any(base.ContractLogKey, ct),
+	)
+
+	channelIndex := coreconfig.FindResource(ct, channel.UID)
+	if channelIndex == coreconfig.NoResource {
+		// TODO: return channelStatusConditionManager.ChannelNotFoundInDataPlaneConfigMap()
+		return channelStatusConditionManager.FailedToResolveConfig(errors.New("missing channel in contract"))
+	}
+
+	after := channel.DeepCopy()
 	after.Status.Subscribers = make([]v1.SubscriberStatus, 0)
-	for _, s := range ch.Spec.Subscribers {
+	for _, s := range channel.Spec.Subscribers {
+		subscriberIndex := coreconfig.FindEgress(ct.Resources[channelIndex].Egresses, s.UID)
+
+		subscriberConfig, err := r.getSubscriberConfig(ctx, channel, &s)
+		if err != nil {
+			// TODO: implement proper status manager for this and similar
+			after.Status.Subscribers = append(after.Status.Subscribers, v1.SubscriberStatus{
+				UID:                s.UID,
+				ObservedGeneration: s.Generation,
+				Ready:              corev1.ConditionFalse,
+				Message:            "Failed to resolve subscriber config",
+			})
+			logger.Error("Failed to resolve subscriber config", zap.Error(err))
+			continue
+		}
+
+		// TODO
+		//statusConditionManager.subscriberResolved(
+		//	fmt.Sprintf("Subscriber will receive events with the delivery order: %s", subscriberConfig.DeliveryOrder.String()),
+		//)
+
+		changed := coreconfig.AddOrUpdateEgressConfig(ct, channelIndex, subscriberConfig, subscriberIndex)
+
+		coreconfig.IncrementContractGeneration(ct)
+
+		logger.Debug("Egress changes", zap.Int("changed", changed))
+
+		if changed == coreconfig.EgressChanged {
+			// Update the configuration map with the new dataPlaneConfig data.
+			if err := r.UpdateDataPlaneConfigMap(ctx, ct, contractConfigMap); err != nil {
+				after.Status.Subscribers = append(after.Status.Subscribers, v1.SubscriberStatus{
+					UID:                s.UID,
+					ObservedGeneration: s.Generation,
+					Ready:              corev1.ConditionFalse,
+					Message:            "Failed to update dataplane configMap",
+				})
+				logger.Error("Failed to update dataplane configMap", zap.Error(err))
+				continue
+			}
+
+			// Update volume generation annotation of dispatcher pods
+			if err := r.UpdateDispatcherPodsAnnotation(ctx, logger, ct.Generation); err != nil {
+				// Failing to update dispatcher pods annotation leads to config map refresh delayed by several seconds.
+				// Since the dispatcher side is the consumer side, we don't lose availability, and we can consider the Trigger
+				// ready. So, log out the error and move on to the next step.
+				logger.Warn(
+					"Failed to update dispatcher pod annotation to trigger an immediate config map refresh",
+					zap.Error(err),
+				)
+
+				after.Status.Subscribers = append(after.Status.Subscribers, v1.SubscriberStatus{
+					UID:                s.UID,
+					ObservedGeneration: s.Generation,
+					Ready:              corev1.ConditionFalse,
+					Message:            "Failed to update dispatcher pods annotation",
+				})
+				logger.Error("Failed to update dispatcher pods annotation", zap.Error(err))
+				continue
+			} else {
+				logger.Debug("Updated dispatcher pod annotation")
+			}
+		}
+
+		logger.Debug("Contract config map updated")
+
 		// TODO: check the subsscription readiness properly
-		//if r, _ := r.statusManager.IsReady(ctx, *ch, s); r {
-		logging.FromContext(ctx).Debugw("marking subscription", zap.Any("subscription", s))
+		//if r, _ := r.statusManager.IsReady(ctx, *channel, s); r {
+		//logging.FromContext(ctx).Debugw("marking subscription", zap.Any("subscription", s))
 		after.Status.Subscribers = append(after.Status.Subscribers, v1.SubscriberStatus{
 			UID:                s.UID,
 			ObservedGeneration: s.Generation,
 			Ready:              corev1.ConditionTrue,
 		})
 		//}
+
+		return nil
 	}
 
-	jsonPatch, err := duck.CreatePatch(ch, after)
+	jsonPatch, err := duck.CreatePatch(channel, after)
 	if err != nil {
 		return fmt.Errorf("creating JSON patch: %w", err)
 	}
@@ -380,13 +493,53 @@ func (r *Reconciler) reconcileSubscribers(ctx context.Context, ch *messagingv1be
 	if err != nil {
 		return fmt.Errorf("marshaling JSON patch: %w", err)
 	}
-	patched, err := r.kafkaClientSet.MessagingV1beta1().KafkaChannels(ch.Namespace).Patch(ctx, ch.Name, types.JSONPatchType, patch, metav1.PatchOptions{}, "status")
+	patched, err := r.kafkaClientSet.MessagingV1beta1().KafkaChannels(channel.Namespace).Patch(ctx, channel.Name, types.JSONPatchType, patch, metav1.PatchOptions{}, "status")
 
 	if err != nil {
 		return fmt.Errorf("Failed patching: %w", err)
 	}
 	logging.FromContext(ctx).Debugw("Patched resource", zap.Any("patch", patch), zap.Any("patched", patched))
 	return nil
+}
+
+func (r *Reconciler) getSubscriberConfig(ctx context.Context, channel *messagingv1beta1.KafkaChannel, subscriber *v1.SubscriberSpec) (*contract.Egress, error) {
+
+	// TODO: everything we need is present in the subscriberSpec I think
+	//destination, err := r.Resolver.URIFromDestinationV1(ctx, subscriber, subscriber)
+	//if err != nil {
+	//	return nil, fmt.Errorf("failed to resolve Trigger.Spec.Subscriber: %w", err)
+	//}
+	//subscriber.Status.SubscriberURI = destination
+
+	egress := &contract.Egress{
+		Destination:   subscriber.SubscriberURI.String(),
+		ConsumerGroup: string(subscriber.UID),
+		Uid:           string(subscriber.UID),
+	}
+
+	//if subscriber.Filter != nil && subscriber.Spec.Filter.Attributes != nil {
+	//	egress.Filter = &contract.Filter{
+	//		Attributes: subscriber.Spec.Filter.Attributes,
+	//	}
+	//}
+
+	egressConfig, err := coreconfig.EgressConfigFromDelivery(ctx, r.Resolver, channel, subscriber.Delivery, r.Configs.DefaultBackoffDelayMs)
+	if err != nil {
+		return nil, err
+	}
+	egress.EgressConfig = egressConfig
+
+	// TODO
+	//deliveryOrderAnnotationValue, ok := subscriber.Annotations[deliveryOrderAnnotation]
+	//if ok {
+	//	deliveryOrder, err := deliveryOrderFromString(deliveryOrderAnnotationValue)
+	//	if err != nil {
+	//		return nil, err
+	//	}
+	//	egress.DeliveryOrder = deliveryOrder
+	//}
+
+	return egress, nil
 }
 
 // TODO: we need something like this
