@@ -25,8 +25,10 @@ import (
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/cache"
 	messagingv1beta1 "knative.dev/eventing-kafka-broker/control-plane/pkg/apis/messaging/v1beta1"
+	eventingduckv1 "knative.dev/eventing/pkg/apis/duck/v1"
 	kubeclient "knative.dev/pkg/client/injection/kube/client"
 	"knative.dev/pkg/configmap"
 	"knative.dev/pkg/controller"
@@ -34,9 +36,11 @@ import (
 	"knative.dev/pkg/resolver"
 	"knative.dev/pkg/tracker"
 
+	kafkaChannelClient "knative.dev/eventing-kafka-broker/control-plane/pkg/client/injection/client"
 	kafkachannelinformer "knative.dev/eventing-kafka-broker/control-plane/pkg/client/injection/informers/messaging/v1beta1/kafkachannel"
 	kafkachannelreconciler "knative.dev/eventing-kafka-broker/control-plane/pkg/client/injection/reconciler/messaging/v1beta1/kafkachannel"
 	configmapinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/configmap"
+	endpointsinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/endpoints"
 	podinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/pod"
 	secretinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/secret"
 
@@ -60,6 +64,7 @@ func NewController(ctx context.Context, watcher configmap.Watcher, configs *Conf
 	messagingv1beta1.RegisterAlternateKafkaChannelConditionSet(base.ConditionSet)
 
 	configmapInformer := configmapinformer.Get(ctx)
+	endpointsInformer := endpointsinformer.Get(ctx)
 
 	reconciler := &Reconciler{
 		Reconciler: &base.Reconciler{
@@ -79,6 +84,8 @@ func NewController(ctx context.Context, watcher configmap.Watcher, configs *Conf
 			ReplicationFactor: DefaultReplicationFactor,
 		},
 		ConfigMapLister: configmapInformer.Lister(),
+		endpointsLister: endpointsInformer.Lister(),
+		kafkaClientSet:  kafkaChannelClient.Get(ctx),
 		Configs:         configs,
 	}
 
@@ -97,6 +104,17 @@ func NewController(ctx context.Context, watcher configmap.Watcher, configs *Conf
 	}
 
 	impl := kafkachannelreconciler.NewImpl(ctx, reconciler)
+
+	statusProber := NewProber(
+		logger.Named("status-manager"),
+		NewProbeTargetLister(logger, endpointsInformer.Lister()),
+		func(c messagingv1beta1.KafkaChannel, s eventingduckv1.SubscriberSpec) {
+			logger.Debugf("Ready callback triggered for channel: %s/%s subscription: %s", c.Namespace, c.Name, string(s.UID))
+			impl.EnqueueKey(types.NamespacedName{Namespace: c.Namespace, Name: c.Name})
+		},
+	)
+	reconciler.statusManager = statusProber
+	statusProber.Start(ctx.Done())
 
 	reconciler.Resolver = resolver.NewURIResolver(ctx, impl.EnqueueKey)
 

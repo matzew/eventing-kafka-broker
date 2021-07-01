@@ -24,14 +24,19 @@ import (
 	"github.com/Shopify/sarama"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/util/retry"
 	messagingv1beta1 "knative.dev/eventing-kafka-broker/control-plane/pkg/apis/messaging/v1beta1"
+	v1 "knative.dev/eventing/pkg/apis/duck/v1"
+	"knative.dev/pkg/apis/duck"
 	"knative.dev/pkg/controller"
 	"knative.dev/pkg/logging"
 	"knative.dev/pkg/reconciler"
 	"knative.dev/pkg/resolver"
 
+	kafkaclientset "knative.dev/eventing-kafka-broker/control-plane/pkg/client/clientset/versioned"
 	"knative.dev/eventing-kafka-broker/control-plane/pkg/config"
 	"knative.dev/eventing-kafka-broker/control-plane/pkg/contract"
 	coreconfig "knative.dev/eventing-kafka-broker/control-plane/pkg/core/config"
@@ -62,12 +67,16 @@ type Reconciler struct {
 	bootstrapServers             []string
 	bootstrapServersLock         sync.RWMutex
 	ConfigMapLister              corelisters.ConfigMapLister
+	endpointsLister              corelisters.EndpointsLister
+	kafkaClientSet               kafkaclientset.Interface
 
 	// ClusterAdmin creates new sarama ClusterAdmin. It's convenient to add this as Reconciler field so that we can
 	// mock the function used during the reconciliation loop.
 	ClusterAdmin kafka.NewClusterAdminFunc
 
 	Configs *Configs
+
+	statusManager *Prober
 }
 
 func (r *Reconciler) ReconcileKind(ctx context.Context, channel *messagingv1beta1.KafkaChannel) reconciler.Event {
@@ -228,6 +237,11 @@ func (r *Reconciler) reconcileKind(ctx context.Context, channel *messagingv1beta
 		logger.Debug("Updated dispatcher pod annotation")
 	}
 
+	err = r.reconcileSubscribers(ctx, channel)
+	if err != nil {
+		return fmt.Errorf("error reconciling subscribers %v", err)
+	}
+
 	return statusConditionManager.Reconciled()
 }
 
@@ -239,6 +253,11 @@ func (r *Reconciler) FinalizeKind(ctx context.Context, channel *messagingv1beta1
 
 func (r *Reconciler) finalizeKind(ctx context.Context, channel *messagingv1beta1.KafkaChannel) reconciler.Event {
 	logger := kafkabrokerlogging.CreateFinalizeMethodLogger(ctx, channel)
+
+	// TODO: experimenting
+	if channel.Status.Subscribers == nil {
+		channel.Status.Subscribers = make([]v1.SubscriberStatus, 0)
+	}
 
 	// Get contract config map.
 	contractConfigMap, err := r.GetOrCreateDataPlaneConfigMap(ctx)
@@ -330,6 +349,42 @@ func (r *Reconciler) finalizeKind(ctx context.Context, channel *messagingv1beta1
 
 	logger.Debug("Topic deleted", zap.String("topic", topic))
 
+	return nil
+}
+
+func (r *Reconciler) reconcileSubscribers(ctx context.Context, ch *messagingv1beta1.KafkaChannel) error {
+	after := ch.DeepCopy()
+	after.Status.Subscribers = make([]v1.SubscriberStatus, 0)
+	for _, s := range ch.Spec.Subscribers {
+		if r, _ := r.statusManager.IsReady(ctx, *ch, s); r {
+			logging.FromContext(ctx).Debugw("marking subscription", zap.Any("subscription", s))
+			after.Status.Subscribers = append(after.Status.Subscribers, v1.SubscriberStatus{
+				UID:                s.UID,
+				ObservedGeneration: s.Generation,
+				Ready:              corev1.ConditionTrue,
+			})
+		}
+	}
+
+	jsonPatch, err := duck.CreatePatch(ch, after)
+	if err != nil {
+		return fmt.Errorf("creating JSON patch: %w", err)
+	}
+	// If there is nothing to patch, we are good, just return.
+	// Empty patch is [], hence we check for that.
+	if len(jsonPatch) == 0 {
+		return nil
+	}
+	patch, err := jsonPatch.MarshalJSON()
+	if err != nil {
+		return fmt.Errorf("marshaling JSON patch: %w", err)
+	}
+	patched, err := r.kafkaClientSet.MessagingV1beta1().KafkaChannels(ch.Namespace).Patch(ctx, ch.Name, types.JSONPatchType, patch, metav1.PatchOptions{}, "status")
+
+	if err != nil {
+		return fmt.Errorf("Failed patching: %w", err)
+	}
+	logging.FromContext(ctx).Debugw("Patched resource", zap.Any("patch", patch), zap.Any("patched", patched))
 	return nil
 }
 

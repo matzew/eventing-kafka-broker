@@ -64,6 +64,7 @@ rules:
       - "*"
     resources:
       - secrets
+      - endpoints
     verbs:
       - list
       - get
