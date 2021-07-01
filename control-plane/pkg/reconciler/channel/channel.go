@@ -356,14 +356,15 @@ func (r *Reconciler) reconcileSubscribers(ctx context.Context, ch *messagingv1be
 	after := ch.DeepCopy()
 	after.Status.Subscribers = make([]v1.SubscriberStatus, 0)
 	for _, s := range ch.Spec.Subscribers {
-		if r, _ := r.statusManager.IsReady(ctx, *ch, s); r {
-			logging.FromContext(ctx).Debugw("marking subscription", zap.Any("subscription", s))
-			after.Status.Subscribers = append(after.Status.Subscribers, v1.SubscriberStatus{
-				UID:                s.UID,
-				ObservedGeneration: s.Generation,
-				Ready:              corev1.ConditionTrue,
-			})
-		}
+		// TODO: check the subsscription readiness properly
+		//if r, _ := r.statusManager.IsReady(ctx, *ch, s); r {
+		logging.FromContext(ctx).Debugw("marking subscription", zap.Any("subscription", s))
+		after.Status.Subscribers = append(after.Status.Subscribers, v1.SubscriberStatus{
+			UID:                s.UID,
+			ObservedGeneration: s.Generation,
+			Ready:              corev1.ConditionTrue,
+		})
+		//}
 	}
 
 	jsonPatch, err := duck.CreatePatch(ch, after)
