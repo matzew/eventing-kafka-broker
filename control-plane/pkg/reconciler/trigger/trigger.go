@@ -21,6 +21,9 @@ import (
 	"fmt"
 	"strings"
 
+	eventingKafkaListers "knative.dev/eventing-kafka-broker/control-plane/pkg/client/listers/eventing/v1alpha1"
+	"knative.dev/pkg/logging"
+
 	"knative.dev/eventing-kafka-broker/control-plane/pkg/contract"
 	"knative.dev/eventing-kafka-broker/control-plane/pkg/reconciler/kafka"
 
@@ -50,9 +53,10 @@ const (
 type Reconciler struct {
 	*base.Reconciler
 
-	BrokerLister   eventinglisters.BrokerLister
-	EventingClient eventingclientset.Interface
-	Resolver       *resolver.URIResolver
+	BrokerLister    eventinglisters.BrokerLister
+	EventingClient  eventingclientset.Interface
+	KafkaSinkLister eventingKafkaListers.KafkaSinkLister
+	Resolver        *resolver.URIResolver
 
 	Configs *config.Env
 }
@@ -265,6 +269,26 @@ func (r *Reconciler) finalizeKind(ctx context.Context, trigger *eventing.Trigger
 }
 
 func (r *Reconciler) getTriggerConfig(ctx context.Context, broker *eventing.Broker, trigger *eventing.Trigger) (*contract.Egress, error) {
+	logger := logging.FromContext(ctx)
+
+	if ref := trigger.Spec.Subscriber.GetRef(); ref != nil && ref.Kind == "KafkaSink" {
+		kafkaSinkRef := ref
+		logger.Warn("We have KAFKA SINK")
+
+		kafkaSink, err := r.KafkaSinkLister.KafkaSinks(kafkaSinkRef.Namespace).Get(kafkaSinkRef.Name)
+		if err != nil && !apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("failed to get kafkasink from lister: %w", err)
+		}
+		if apierrors.IsNotFound(err) {
+			// is gone?
+			return nil, nil
+		}
+
+		// capture these to the EGRESS
+		logger.Warn("CLUSTER: ", kafkaSink.Spec.BootstrapServers)
+		logger.Warn("TOPIC: ", kafkaSink.Spec.Topic)
+	}
+
 	destination, err := r.Resolver.URIFromDestinationV1(ctx, trigger.Spec.Subscriber, trigger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve Trigger.Spec.Subscriber: %w", err)

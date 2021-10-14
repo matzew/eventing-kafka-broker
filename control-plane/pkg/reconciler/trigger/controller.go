@@ -31,6 +31,7 @@ import (
 	"knative.dev/pkg/logging"
 	"knative.dev/pkg/resolver"
 
+	kafkasinkinformer "knative.dev/eventing-kafka-broker/control-plane/pkg/client/injection/informers/eventing/v1alpha1/kafkasink"
 	apiseventing "knative.dev/eventing/pkg/apis/eventing"
 	eventing "knative.dev/eventing/pkg/apis/eventing/v1"
 	eventingclient "knative.dev/eventing/pkg/client/injection/client"
@@ -56,6 +57,7 @@ func NewController(ctx context.Context, _ configmap.Watcher, configs *config.Env
 
 	configmapInformer := configmapinformer.Get(ctx)
 	brokerInformer := brokerinformer.Get(ctx)
+	kafkaSinkInformer := kafkasinkinformer.Get(ctx)
 	triggerInformer := triggerinformer.Get(ctx)
 	triggerLister := triggerInformer.Lister()
 
@@ -71,9 +73,10 @@ func NewController(ctx context.Context, _ configmap.Watcher, configs *config.Env
 			DispatcherLabel:             base.BrokerDispatcherLabel,
 			ReceiverLabel:               base.BrokerReceiverLabel,
 		},
-		BrokerLister:   brokerInformer.Lister(),
-		EventingClient: eventingclient.Get(ctx),
-		Configs:        configs,
+		BrokerLister:    brokerInformer.Lister(),
+		KafkaSinkLister: kafkaSinkInformer.Lister(),
+		EventingClient:  eventingclient.Get(ctx),
+		Configs:         configs,
 	}
 
 	impl := triggerreconciler.NewImpl(ctx, reconciler, func(impl *controller.Impl) controller.Options {
