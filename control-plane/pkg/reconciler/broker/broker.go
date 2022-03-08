@@ -126,22 +126,9 @@ func (r *Reconciler) reconcileKind(ctx context.Context, broker *eventing.Broker)
 		return fmt.Errorf("failed to track secret: %w", err)
 	}
 
-	topicName := resolveTopicName(broker)
-
-	saramaConfig, err := kafka.GetSaramaConfig(securityOption)
-	if err != nil {
-		return statusConditionManager.FailedToCreateTopic(topicName, fmt.Errorf("error getting cluster admin config: %w", err))
-	}
-
-	kafkaClusterAdminClient, err := r.NewKafkaClusterAdminClient(topicConfig.BootstrapServers, saramaConfig)
-	if err != nil {
-		return statusConditionManager.FailedToCreateTopic(topicName, fmt.Errorf("cannot obtain Kafka cluster admin, %w", err))
-	}
-	defer kafkaClusterAdminClient.Close()
-
-	topic, err := kafka.CreateTopicIfDoesntExist(kafkaClusterAdminClient, logger, topicName, topicConfig)
-	if err != nil {
-		return statusConditionManager.FailedToCreateTopic(topic, err)
+	topic, event := r.createOrUseExistingTopic(broker, securityOption, statusConditionManager, topicConfig, logger)
+	if event != nil {
+		return event
 	}
 	statusConditionManager.TopicReady(topic)
 
@@ -243,6 +230,32 @@ func (r *Reconciler) reconcileKind(ctx context.Context, broker *eventing.Broker)
 	statusConditionManager.Addressable(address)
 
 	return nil
+}
+
+func (r *Reconciler) createOrUseExistingTopic(broker *eventing.Broker, securityOption kafka.ConfigOption, statusConditionManager base.StatusConditionManager, topicConfig *kafka.TopicConfig, logger *zap.Logger) (string, reconciler.Event) {
+
+	topicAnnotationValue, ok := isCustomTopic(broker)
+	if ok {
+		return topicAnnotationValue, nil
+	} else {
+		topicName := kafka.BrokerTopic(TopicPrefix, broker)
+		saramaConfig, err := kafka.GetSaramaConfig(securityOption)
+		if err != nil {
+			return "", statusConditionManager.FailedToCreateTopic(topicName, fmt.Errorf("error getting cluster admin config: %w", err))
+		}
+
+		kafkaClusterAdminClient, err := r.NewKafkaClusterAdminClient(topicConfig.BootstrapServers, saramaConfig)
+		if err != nil {
+			return "", statusConditionManager.FailedToCreateTopic(topicName, fmt.Errorf("cannot obtain Kafka cluster admin, %w", err))
+		}
+		defer kafkaClusterAdminClient.Close()
+
+		topic, err := kafka.CreateTopicIfDoesntExist(kafkaClusterAdminClient, logger, topicName, topicConfig)
+		if err != nil {
+			return "", statusConditionManager.FailedToCreateTopic(topic, err)
+		}
+		return topic, nil
+	}
 }
 
 func (r *Reconciler) FinalizeKind(ctx context.Context, broker *eventing.Broker) reconciler.Event {
