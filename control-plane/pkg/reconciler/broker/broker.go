@@ -48,6 +48,10 @@ import (
 const (
 	// TopicPrefix is the Kafka Broker topic prefix - (topic name: knative-broker-<broker-namespace>-<broker-name>).
 	TopicPrefix = "knative-broker-"
+
+	// private annotation for changing the topic
+	// NOTE: this may go away in a future release
+	topicAnnotation = "x-kafka.eventing.knative.dev/broker.topic"
 )
 
 type Reconciler struct {
@@ -122,7 +126,7 @@ func (r *Reconciler) reconcileKind(ctx context.Context, broker *eventing.Broker)
 		return fmt.Errorf("failed to track secret: %w", err)
 	}
 
-	topicName := kafka.BrokerTopic(TopicPrefix, broker)
+	topicName := resolveTopicName(broker)
 
 	saramaConfig, err := kafka.GetSaramaConfig(securityOption)
 	if err != nil {
@@ -341,7 +345,7 @@ func (r *Reconciler) finalizeKind(ctx context.Context, broker *eventing.Broker) 
 	}
 	defer kafkaClusterAdminClient.Close()
 
-	topic, err := kafka.DeleteTopic(kafkaClusterAdminClient, kafka.BrokerTopic(TopicPrefix, broker))
+	topic, err := kafka.DeleteTopic(kafkaClusterAdminClient, resolveTopicName(broker))
 	if err != nil {
 		return err
 	}
@@ -482,4 +486,18 @@ func (r *Reconciler) removeFinalizerCM(ctx context.Context, finalizer string, cm
 
 func finalizerCM(object metav1.Object) string {
 	return fmt.Sprintf("%s/%s-%s", "kafka.brokers.eventing.knative.dev", object.GetNamespace(), object.GetName())
+}
+
+func resolveTopicName(broker *eventing.Broker) string {
+	topicName := kafka.BrokerTopic(TopicPrefix, broker)
+	topicAnnotationValue, ok := isCustomTopic(broker)
+	if ok {
+		topicName = topicAnnotationValue
+	}
+	return topicName
+}
+
+func isCustomTopic(broker *eventing.Broker) (string, bool) {
+	topicAnnotationValue, ok := broker.Annotations[topicAnnotation]
+	return topicAnnotationValue, ok
 }
