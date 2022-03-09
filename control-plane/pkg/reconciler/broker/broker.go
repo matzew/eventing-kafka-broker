@@ -51,7 +51,7 @@ const (
 
 	// private annotation for changing the topic
 	// NOTE: this may go away in a future release
-	topicAnnotation = "x-kafka.eventing.knative.dev/broker.topic"
+	topicAnnotation = "x-kafka.eventing.knative.dev/external.topic"
 )
 
 type Reconciler struct {
@@ -126,13 +126,11 @@ func (r *Reconciler) reconcileKind(ctx context.Context, broker *eventing.Broker)
 		return fmt.Errorf("failed to track secret: %w", err)
 	}
 
-	topic, event := r.createOrUseExistingTopic(broker, securityOption, statusConditionManager, topicConfig, logger)
-	if event != nil {
-		return event
+	// establish topic
+	topic, err := r.reconcileBrokerTopic(broker, securityOption, statusConditionManager, topicConfig, logger)
+	if err != nil {
+		return err
 	}
-	statusConditionManager.TopicReady(topic)
-
-	logger.Debug("Topic created", zap.Any("topic", topic))
 
 	// Get contract config map.
 	contractConfigMap, err := r.GetOrCreateDataPlaneConfigMap(ctx)
@@ -232,30 +230,47 @@ func (r *Reconciler) reconcileKind(ctx context.Context, broker *eventing.Broker)
 	return nil
 }
 
-func (r *Reconciler) createOrUseExistingTopic(broker *eventing.Broker, securityOption kafka.ConfigOption, statusConditionManager base.StatusConditionManager, topicConfig *kafka.TopicConfig, logger *zap.Logger) (string, reconciler.Event) {
+func (r *Reconciler) reconcileBrokerTopic(broker *eventing.Broker, securityOption kafka.ConfigOption, statusConditionManager base.StatusConditionManager, topicConfig *kafka.TopicConfig, logger *zap.Logger) (string, reconciler.Event) {
 
-	topicAnnotationValue, ok := isCustomTopic(broker)
+	saramaConfig, err := kafka.GetSaramaConfig(securityOption)
+	if err != nil {
+		// WRONG status
+		return "", statusConditionManager.FailedToCreateTopic("topicAnnotationValue", fmt.Errorf("error getting cluster admin config: %w", err))
+	}
+
+	kafkaClusterAdminClient, err := r.NewKafkaClusterAdminClient(topicConfig.BootstrapServers, saramaConfig)
+	if err != nil {
+		// WRONG status
+		return "", statusConditionManager.FailedToCreateTopic("", fmt.Errorf("cannot obtain Kafka cluster admin, %w", err))
+	}
+	defer kafkaClusterAdminClient.Close()
+
+	// if we have a custom topic annotation the topic is externally manged
+	topicName, ok := isExternalTopic(broker)
 	if ok {
-		return topicAnnotationValue, nil
+
+		isPresentAndValid, err := kafka.AreTopicsPresentAndValid(kafkaClusterAdminClient, topicName)
+
+		if err != nil {
+			return "", statusConditionManager.TopicsNotPresentOrInvalidErr([]string{topicName}, err)
+		}
+		if !isPresentAndValid {
+			// The topic might be invalid.
+			return "", statusConditionManager.TopicsNotPresentOrInvalid([]string{topicName})
+		}
 	} else {
 		topicName := kafka.BrokerTopic(TopicPrefix, broker)
-		saramaConfig, err := kafka.GetSaramaConfig(securityOption)
-		if err != nil {
-			return "", statusConditionManager.FailedToCreateTopic(topicName, fmt.Errorf("error getting cluster admin config: %w", err))
-		}
-
-		kafkaClusterAdminClient, err := r.NewKafkaClusterAdminClient(topicConfig.BootstrapServers, saramaConfig)
-		if err != nil {
-			return "", statusConditionManager.FailedToCreateTopic(topicName, fmt.Errorf("cannot obtain Kafka cluster admin, %w", err))
-		}
-		defer kafkaClusterAdminClient.Close()
 
 		topic, err := kafka.CreateTopicIfDoesntExist(kafkaClusterAdminClient, logger, topicName, topicConfig)
 		if err != nil {
 			return "", statusConditionManager.FailedToCreateTopic(topic, err)
 		}
-		return topic, nil
 	}
+
+	statusConditionManager.TopicReady(topicName)
+	logger.Debug("Topic created", zap.Any("topic", topicName))
+
+	return topicName, nil
 }
 
 func (r *Reconciler) FinalizeKind(ctx context.Context, broker *eventing.Broker) reconciler.Event {
@@ -503,14 +518,14 @@ func finalizerCM(object metav1.Object) string {
 
 func resolveTopicName(broker *eventing.Broker) string {
 	topicName := kafka.BrokerTopic(TopicPrefix, broker)
-	topicAnnotationValue, ok := isCustomTopic(broker)
+	topicAnnotationValue, ok := isExternalTopic(broker)
 	if ok {
 		topicName = topicAnnotationValue
 	}
 	return topicName
 }
 
-func isCustomTopic(broker *eventing.Broker) (string, bool) {
+func isExternalTopic(broker *eventing.Broker) (string, bool) {
 	topicAnnotationValue, ok := broker.Annotations[topicAnnotation]
 	return topicAnnotationValue, ok
 }
