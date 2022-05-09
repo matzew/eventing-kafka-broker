@@ -42,7 +42,7 @@ spec:
     spec:
       containers:
       - name: heartbeats
-        image: registry.ci.openshift.org/openshift/knative-v1.2.1:knative-eventing-test-heartbeats
+        image: ko://knative.dev/eventing/test/test_images/heartbeats
         args:
         - --period=1
         env:
