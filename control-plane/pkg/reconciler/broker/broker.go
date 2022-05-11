@@ -49,9 +49,8 @@ const (
 	// TopicPrefix is the Kafka Broker topic prefix - (topic name: knative-broker-<broker-namespace>-<broker-name>).
 	TopicPrefix = "knative-broker-"
 
-	// private annotation for changing the topic
-	// NOTE: this may go away in a future release
-	externalTopicAnnotation = "x-kafka.eventing.knative.dev/external.topic"
+	// annotation for using external kafka topic for the broker
+	externalTopicAnnotation = "kafka.eventing.knative.dev/external.topic"
 )
 
 type Reconciler struct {
