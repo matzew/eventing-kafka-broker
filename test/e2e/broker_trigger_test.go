@@ -24,6 +24,8 @@ import (
 	"fmt"
 	"testing"
 
+	"knative.dev/eventing-kafka/test/e2e/helpers"
+
 	. "github.com/cloudevents/sdk-go/v2/test"
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
@@ -266,5 +268,108 @@ func TestBrokerWithConfig(t *testing.T) {
 		if err != nil {
 			t.Errorf("failed to verify num partitions and replication factors: %v", err)
 		}
+	})
+}
+
+func TestBrokerExternalTopicTrigger(t *testing.T) {
+	testingpkg.RunMultiple(t, func(t *testing.T) {
+
+		ctx := context.Background()
+
+		client := testlib.Setup(t, true)
+		defer testlib.TearDown(client)
+
+		const (
+			kafkaClusterName      = "my-cluster"
+			kafkaClusterNamespace = "kafka"
+			kafkaTopicSuffix      = "my-topic"
+
+			senderName  = "sender"
+			triggerName = "trigger"
+			subscriber  = "subscriber"
+
+			eventType       = "type1"
+			eventSource     = "source1"
+			eventBody       = `{"msg":"e2e-eventtransformation-body"}`
+			extension1      = "ext1"
+			valueExtension1 = "value1"
+		)
+
+		helpers.MustCreateTopic(client, kafkaClusterName, kafkaClusterNamespace, client.Namespace+"-"+kafkaTopicSuffix, 10)
+
+		nonMatchingEventId := uuid.New().String()
+		eventId := uuid.New().String()
+
+		client.CreateBrokerOrFail(
+			brokerName,
+			resources.WithBrokerClassForBroker(kafka.BrokerClass),
+			resources.WithCustomAnnotationForBroker(broker.ExternalTopicAnnotation, client.Namespace+"-"+kafkaTopicSuffix),
+		)
+
+		eventTracker, _ := recordevents.StartEventRecordOrFail(ctx, client, subscriber)
+
+		client.CreateTriggerOrFail(
+			triggerName,
+			resources.WithBroker(brokerName),
+			resources.WithSubscriberServiceRefForTrigger(subscriber),
+			func(trigger *eventing.Trigger) {
+				trigger.Spec.Filter = &eventing.TriggerFilter{
+					Attributes: map[string]string{
+						"source":   eventSource,
+						extension1: valueExtension1,
+						"type":     "",
+					},
+				}
+			},
+		)
+
+		client.WaitForAllTestResourcesReadyOrFail(ctx)
+
+		t.Logf("Sending events to %s/%s", client.Namespace, brokerName)
+
+		nonMatchingEvent := cloudevents.NewEvent()
+		nonMatchingEvent.SetID(eventId)
+		nonMatchingEvent.SetType(eventType)
+		nonMatchingEvent.SetSource(eventSource)
+		nonMatchingEvent.SetExtension(extension1, valueExtension1+"a")
+		if err := nonMatchingEvent.SetData(cloudevents.ApplicationJSON, []byte(eventBody)); err != nil {
+			t.Fatalf("Cannot set the payload of the event: %s", err.Error())
+		}
+
+		client.SendEventToAddressable(
+			ctx,
+			senderName+"non-matching",
+			brokerName,
+			testlib.BrokerTypeMeta,
+			nonMatchingEvent,
+		)
+
+		eventToSend := cloudevents.NewEvent()
+		eventToSend.SetID(eventId)
+		eventToSend.SetType(eventType)
+		eventToSend.SetSource(eventSource)
+		eventToSend.SetExtension(extension1, valueExtension1)
+		if err := eventToSend.SetData(cloudevents.ApplicationJSON, []byte(eventBody)); err != nil {
+			t.Fatalf("Cannot set the payload of the event: %s", err.Error())
+		}
+
+		client.SendEventToAddressable(
+			ctx,
+			senderName+"matching",
+			brokerName,
+			testlib.BrokerTypeMeta,
+			eventToSend,
+		)
+
+		eventTracker.AssertAtLeast(1, recordevents.MatchEvent(
+			HasId(eventId),
+			HasSource(eventSource),
+			HasType(eventType),
+			HasData([]byte(eventBody)),
+		))
+
+		eventTracker.AssertNot(recordevents.MatchEvent(
+			HasId(nonMatchingEventId),
+		))
 	})
 }
