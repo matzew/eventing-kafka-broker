@@ -22,11 +22,18 @@ package e2e
 import (
 	"context"
 	"fmt"
-	"testing"
-
 	"knative.dev/eventing-kafka/test/e2e/helpers"
+	"testing"
+	"time"
+
+	"k8s.io/apiserver/pkg/storage/names"
+	"k8s.io/client-go/util/retry"
 
 	. "github.com/cloudevents/sdk-go/v2/test"
+	"github.com/stretchr/testify/assert"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/google/uuid"
@@ -295,16 +302,70 @@ func TestBrokerExternalTopicTrigger(t *testing.T) {
 			valueExtension1 = "value1"
 		)
 
-		helpers.MustCreateTopic(client, kafkaClusterName, kafkaClusterNamespace, client.Namespace+"-"+kafkaTopicSuffix, 10)
+		testTopicName := client.Namespace + "-" + kafkaTopicSuffix
+		helpers.MustCreateKafkaUserForTopic(client, kafkaClusterName, kafkaClusterNamespace, "tls", testTopicName, testTopicName)
+		helpers.MustCreateTopic(client, kafkaClusterName, kafkaClusterNamespace, testTopicName, 10)
 
 		nonMatchingEventId := uuid.New().String()
 		eventId := uuid.New().String()
 
+		cm := client.CreateConfigMapOrFail(testTopicName, client.Namespace, map[string]string{
+			"default.topic.replication.factor": "2",
+			"default.topic.partitions":         "2",
+			kafka.BootstrapServersConfigMapKey: testingpkg.BootstrapServersSsl,
+			"auth.secret.ref.name":             testTopicName,
+		})
+
 		client.CreateBrokerOrFail(
 			brokerName,
 			resources.WithBrokerClassForBroker(kafka.BrokerClass),
-			resources.WithCustomAnnotationForBroker(broker.ExternalTopicAnnotation, client.Namespace+"-"+kafkaTopicSuffix),
+			resources.WithCustomAnnotationForBroker(broker.ExternalTopicAnnotation, testTopicName),
+			resources.WithConfigForBroker(&duckv1.KReference{
+				Kind:       "ConfigMap",
+				Namespace:  cm.Namespace,
+				Name:       cm.Name,
+				APIVersion: "v1",
+			}),
 		)
+
+		// secret doesn't exist, so broker won't become ready.
+		time.Sleep(time.Second * 30)
+		br, err := client.Eventing.EventingV1().Brokers(client.Namespace).Get(ctx, brokerName, metav1.GetOptions{})
+		assert.Nil(t, err)
+		assert.False(t, br.IsReady(), "secret %s/%s doesn't exist, so broker must no be ready", client.Namespace, testTopicName)
+
+		secretData := sslWithUsername(t, client, testTopicName)
+
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: client.Namespace,
+				Name:      testTopicName,
+			},
+			Data: secretData,
+		}
+
+		_, err = client.Kube.CoreV1().Secrets(client.Namespace).Create(ctx, secret, metav1.CreateOptions{})
+		assert.Nil(t, err)
+
+		// Trigger a reconciliation by updating the referenced ConfigMap in broker.spec.config.
+		err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+			config, err := client.Kube.CoreV1().ConfigMaps(client.Namespace).Get(ctx, cm.Name, metav1.GetOptions{})
+			if err != nil {
+				return nil
+			}
+
+			if config.Labels == nil {
+				config.Labels = make(map[string]string, 1)
+			}
+			config.Labels["test.eventing.knative.dev/updated"] = names.SimpleNameGenerator.GenerateName("now")
+
+			_, err = client.Kube.CoreV1().ConfigMaps(client.Namespace).Update(ctx, config, metav1.UpdateOptions{})
+			return err
+		})
+		assert.Nil(t, err)
+
+		client.WaitForResourceReadyOrFail(brokerName, testlib.BrokerTypeMeta)
+
 
 		eventTracker, _ := recordevents.StartEventRecordOrFail(ctx, client, subscriber)
 
@@ -372,4 +433,20 @@ func TestBrokerExternalTopicTrigger(t *testing.T) {
 			HasId(nonMatchingEventId),
 		))
 	})
+}
+
+
+func sslWithUsername(t *testing.T, client *testlib.Client, userName string) map[string][]byte {
+	caSecret, err := client.Kube.CoreV1().Secrets("kafka").Get(context.Background(), "my-cluster-cluster-ca-cert", metav1.GetOptions{})
+	assert.Nil(t, err)
+
+	tlsUserSecret, err := client.Kube.CoreV1().Secrets("kafka").Get(context.Background(), userName, metav1.GetOptions{})
+	assert.Nil(t, err)
+
+	return map[string][]byte{
+		"protocol": []byte("SSL"),
+		"ca.crt":   caSecret.Data["ca.crt"],
+		"user.crt": tlsUserSecret.Data["user.crt"],
+		"user.key": tlsUserSecret.Data["user.key"],
+	}
 }

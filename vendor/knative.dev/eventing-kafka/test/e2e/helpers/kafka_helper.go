@@ -252,7 +252,7 @@ func MustCreateTopic(client *testlib.Client, clusterName, clusterNamespace, topi
 	}
 }
 
-func MustCreateKafkaUserForTopic(client *testlib.Client, clusterName, clusterNamespace, userName, topicName string) {
+func MustCreateKafkaUserForTopic(client *testlib.Client, clusterName, clusterNamespace, authenticationType, userName, topicName string) {
 	obj := unstructured.Unstructured{
 		Object: map[string]interface{}{
 			"apiVersion": userGVR.GroupVersion().String(),
@@ -264,6 +264,9 @@ func MustCreateKafkaUserForTopic(client *testlib.Client, clusterName, clusterNam
 				},
 			},
 			"spec": map[string]interface{}{
+				"authentication": map[string]interface{}{
+					"type": authenticationType,
+				},
 				"authorization": map[string]interface{}{
 					"type": "simple",
 					"acls": []interface{}{
@@ -301,12 +304,12 @@ func MustCreateKafkaUserForTopic(client *testlib.Client, clusterName, clusterNam
 	if err != nil {
 		client.T.Fatalf("Error while creating the user %s for topic %s: %v", userName, topicName, err)
 	}
-	client.Tracker.Add(userGVR.Group, userGVR.Version, userGVR.Resource, clusterNamespace, topicName)
+	client.Tracker.Add(userGVR.Group, userGVR.Version, userGVR.Resource, clusterNamespace, userName)
 
 	// Wait for the user to be ready
-	if err := WaitForKafkaResourceReady(context.Background(), client, clusterNamespace, topicName, userGVR); err != nil {
-		client.T.Fatalf("Error while creating the user %s for topic %s: %v", userName, topicName, err)
-	}
+	//if err := WaitForKafkaResourceReady(context.Background(), client, clusterNamespace, userName, userGVR); err != nil {
+	//	client.T.Fatalf("Error while creating the user %s for topic %s: %v", userName, topicName, err)
+	//}
 }
 
 //CheckKafkaSourceState waits for specified kafka source resource state
