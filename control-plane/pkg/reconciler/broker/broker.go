@@ -125,6 +125,10 @@ func (r *Reconciler) reconcileKind(ctx context.Context, broker *eventing.Broker)
 		return fmt.Errorf("failed to track secret: %w", err)
 	}
 
+	if err := r.addFinalizerSecret(ctx, finalizerSecret(broker), secret); err != nil {
+		return err
+	}
+
 	topic, err := r.reconcileBrokerTopic(broker, securityOption, statusConditionManager, topicConfig, logger)
 	if err != nil {
 		return err
@@ -495,4 +499,54 @@ func (r *Reconciler) reconcilerBrokerResource(ctx context.Context, topic string,
 func isExternalTopic(broker *eventing.Broker) (string, bool) {
 	topicAnnotationValue, ok := broker.Annotations[ExternalTopicAnnotation]
 	return topicAnnotationValue, ok
+}
+
+
+// add all the crap here
+
+func (r *Reconciler) addFinalizerSecret(ctx context.Context, finalizer string, secret *corev1.Secret) error {
+	if !containsFinalizerSecret(secret, finalizer) {
+		secret := secret.DeepCopy() // Do not modify informer copy.
+		secret.Finalizers = append(secret.Finalizers, finalizer)
+		_, err := r.KubeClient.CoreV1().Secrets(secret.GetNamespace()).Update(ctx, secret, metav1.UpdateOptions{})
+		if err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("failed to add finalizer to Secret %s/%s: %w", secret.GetNamespace(), secret.GetName(), err)
+		}
+	}
+	return nil
+}
+
+func (r *Reconciler) removeFinalizerSecret(ctx context.Context, finalizer string, secret *corev1.Secret) error {
+	newFinalizers := make([]string, 0, len(secret.Finalizers))
+	for _, f := range secret.Finalizers {
+		if f != finalizer {
+			newFinalizers = append(newFinalizers, f)
+		}
+	}
+	if len(newFinalizers) != len(secret.Finalizers) {
+		secret := secret.DeepCopy() // Do not modify informer copy.
+		secret.Finalizers = newFinalizers
+		_, err := r.KubeClient.CoreV1().Secrets(secret.GetNamespace()).Update(ctx, secret, metav1.UpdateOptions{})
+		if err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("failed to remove finalizer %s from Secret %s/%s: %w", finalizer, secret.GetNamespace(), secret.GetName(), err)
+		}
+	}
+	return nil
+}
+
+
+func containsFinalizerSecret(secret *corev1.Secret, finalizer string) bool {
+	if secret == nil {
+		return false
+	}
+	for _, f := range secret.Finalizers {
+		if f == finalizer {
+			return true
+		}
+	}
+	return false
+}
+
+func finalizerSecret(object metav1.Object) string {
+	return fmt.Sprintf("%s/%s", object.GetNamespace(), object.GetUID())
 }
