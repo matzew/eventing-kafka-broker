@@ -53,8 +53,8 @@ func TestDeadLetterSinkExtensions(t *testing.T) {
 
 	env.Test(ctx, t, SubscriberUnreachable())
 	env.Test(ctx, t, SubscriberReturnedErrorNoData())
-	env.Test(ctx, t, SubscriberReturnedErrorSmallData())
-	env.Test(ctx, t, SubscriberReturnedErrorLargeData())
+	//env.Test(ctx, t, SubscriberReturnedErrorSmallData())
+	//env.Test(ctx, t, SubscriberReturnedErrorLargeData())
 }
 
 func SubscriberUnreachable() *feature.Feature {
