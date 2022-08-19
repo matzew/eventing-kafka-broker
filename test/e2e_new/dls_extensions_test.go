@@ -51,10 +51,10 @@ func TestDeadLetterSinkExtensions(t *testing.T) {
 		environment.Managed(t),
 	)
 
-	//env.Test(ctx, t, SubscriberUnreachable())
+	env.Test(ctx, t, SubscriberUnreachable())
 	env.Test(ctx, t, SubscriberReturnedErrorNoData())
-	//env.Test(ctx, t, SubscriberReturnedErrorSmallData())
-	//env.Test(ctx, t, SubscriberReturnedErrorLargeData())
+	env.Test(ctx, t, SubscriberReturnedErrorSmallData())
+	env.Test(ctx, t, SubscriberReturnedErrorLargeData())
 }
 
 func SubscriberUnreachable() *feature.Feature {
@@ -121,21 +121,23 @@ func SubscriberReturnedErrorNoData() *feature.Feature {
 	f.Setup("install broker", broker.Install(
 		brokerName,
 		broker.WithBrokerClass(kafka.BrokerClass),
-		broker.WithConfig(single_partition_config.ConfigMapName),
 	))
+
 	f.Setup("broker is ready", broker.IsReady(brokerName))
 	f.Setup("broker is addressable", broker.IsAddressable(brokerName))
 
 	f.Setup("install sink", eventshub.Install(
 		sinkName,
 		eventshub.StartReceiver,
-		eventshub.DropEventsResponseBody(""),
-		eventshub.DropEventsResponseCode(422),
+		eventshub.DropFirstN(1),
+		eventshub.DropEventsResponseCode(422), // retry error
 	))
+
 	f.Setup("install dead letter sink", eventshub.Install(
 		deadLetterSinkName,
 		eventshub.StartReceiver,
 	))
+
 	f.Setup("install trigger", trigger.Install(
 		triggerName,
 		brokerName,
@@ -147,20 +149,19 @@ func SubscriberReturnedErrorNoData() *feature.Feature {
 	f.Requirement("install source", eventshub.Install(
 		sourceName,
 		eventshub.StartSenderToResource(broker.GVR(), brokerName),
-		eventshub.InputEventWithEncoding(ev, cloudevents.EncodingBinary),
-		eventshub.AddSequence,
-		eventshub.SendMultipleEvents(1, 100*time.Millisecond),
+		eventshub.InputEvent(ev),
 	))
 
 	f.Assert("knativeerrordest & knativeerrorcode added", assertEnhancedWithKnativeErrorExtensions(
 		deadLetterSinkName,
 		func(ctx context.Context) cetest.EventMatcher {
-			dlsAddress, _ := svc.Address(ctx, deadLetterSinkName)
-			return cetest.HasExtension("knativeerrordest", dlsAddress.String())
+			sinkAddress, _ := svc.Address(ctx, sinkName)
+			return cetest.HasExtension("knativeerrordest", sinkAddress.String())
 		},
-		//func(ctx context.Context) cetest.EventMatcher {
-		//	return cetest.HasExtension("knativeerrorcode", "422")
-		//},
+
+		func(ctx context.Context) cetest.EventMatcher {
+			return cetest.HasExtension("knativeerrorcode", "422")
+		},
 	))
 
 	return f
@@ -190,6 +191,7 @@ func SubscriberReturnedErrorSmallData() *feature.Feature {
 	f.Setup("install sink", eventshub.Install(
 		sinkName,
 		eventshub.StartReceiver,
+		eventshub.DropFirstN(1),
 		eventshub.DropEventsResponseCode(422),
 		eventshub.DropEventsResponseBody(errorData),
 	))
@@ -208,16 +210,14 @@ func SubscriberReturnedErrorSmallData() *feature.Feature {
 	f.Requirement("install source", eventshub.Install(
 		sourceName,
 		eventshub.StartSenderToResource(broker.GVR(), brokerName),
-		eventshub.InputEventWithEncoding(ev, cloudevents.EncodingBinary),
-		eventshub.AddSequence,
-		eventshub.SendMultipleEvents(1, 100*time.Millisecond),
+		eventshub.InputEvent(ev),
 	))
 
 	f.Assert("knativeerrordest, knativeerrorcode, knativeerrordata added", assertEnhancedWithKnativeErrorExtensions(
 		deadLetterSinkName,
 		func(ctx context.Context) cetest.EventMatcher {
-			dlsAddress, _ := svc.Address(ctx, deadLetterSinkName)
-			return cetest.HasExtension("knativeerrordest", dlsAddress.String())
+			sinkAddress, _ := svc.Address(ctx, sinkName)
+			return cetest.HasExtension("knativeerrordest", sinkAddress.String())
 		},
 		func(ctx context.Context) cetest.EventMatcher {
 			return cetest.HasExtension("knativeerrorcode", "422")
@@ -255,6 +255,7 @@ func SubscriberReturnedErrorLargeData() *feature.Feature {
 	f.Setup("install sink", eventshub.Install(
 		sinkName,
 		eventshub.StartReceiver,
+		eventshub.DropFirstN(1),
 		eventshub.DropEventsResponseCode(422),
 		eventshub.DropEventsResponseBody(errorData),
 	))
@@ -273,16 +274,14 @@ func SubscriberReturnedErrorLargeData() *feature.Feature {
 	f.Requirement("install source", eventshub.Install(
 		sourceName,
 		eventshub.StartSenderToResource(broker.GVR(), brokerName),
-		eventshub.InputEventWithEncoding(ev, cloudevents.EncodingBinary),
-		eventshub.AddSequence,
-		eventshub.SendMultipleEvents(1, 100*time.Millisecond),
+		eventshub.InputEvent(ev),
 	))
 
 	f.Assert("knativeerrordest, knativeerrorcode, truncated knativeerrordata added", assertEnhancedWithKnativeErrorExtensions(
 		deadLetterSinkName,
 		func(ctx context.Context) cetest.EventMatcher {
-			dlsAddress, _ := svc.Address(ctx, deadLetterSinkName)
-			return cetest.HasExtension("knativeerrordest", dlsAddress.String())
+			sinkAddress, _ := svc.Address(ctx, sinkName)
+			return cetest.HasExtension("knativeerrordest", sinkAddress.String())
 		},
 		func(ctx context.Context) cetest.EventMatcher {
 			return cetest.HasExtension("knativeerrorcode", "422")
